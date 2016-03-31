@@ -1,87 +1,194 @@
-class GCETaskProxy
-  def initialize
-    @instance_pool = InstancePool.new
-  end
+require 'shellwords'
+require 'json'
+require 'fileutils'
 
-  def run_task(task)
-    instance = @instance_pool.pop(task)
-    instance.run_task(task)
-    @instance_pool.push(instance)
-  end
+module GoogleComputeEngine
+  class CLI
+    def initialize(zone: 'asia-east1-b', gcloud_path: 'gcloud')
+      @zone = zone
+      @gcloud_path = gcloud_path
+    end
 
-  class Task
+    def gcloud(*args)
+      command = @gcloud_path +
+        ' ' +
+        args.map { |arg| Shellwords.escape(arg) }.join(' ') +
+        ' --zone ' +
+        Shellwords.escape(@zone)
+      ret = `#{ command }`
+    end
+
+    def gcloud_json(*args)
+      command = @gcloud_path +
+        ' --format json ' +
+        args.map { |arg| Shellwords.escape(arg) }.join(' ') +
+        ' --zone ' +
+        Shellwords.escape(@zone)
+      ret = `#{ command }`
+      JSON.parse(ret)
+    end
+
+    def gcloud_ssh_command(name, command)
+      command = @gcloud_path +
+        ' compute ssh -A ' +
+        Shellwords.escape(name) +
+        ' --command ' +
+        "'#{ command }'"
+      
+      pipe_broken = false
+      IO.popen(command, 'r+', STDERR => [:child, STDOUT]) do |io|
+        io.close_write
+        while line = io.gets
+          print line
+          if line.chomp =~ /Broken pipe$/
+            pipe_broken = true
+          end
+        end
+      end
+      result_code = $?.to_i
+
+      if pipe_broken && result_code != 0
+        raise InstanceTerminatedError.new
+      end
+
+      return result_code
+    end
   end
 
   class Instance
-    def run_task(task)
+    def initialize(attr, cli)
+      @attr = attr
+      @cli = cli
     end
 
-    def mark_busy!
+    def self.list(cli)
+      instance_list = cli.gcloud_json('compute', 'instances', 'list')
+      instance_list.map { |attr| Instance.new(attr, cli) }
     end
 
-    def mark_idle!
+    def name
+      @attr['name']
+    end
+
+    def status
+      @attr["status"]
+    end
+
+    def terminated?
+      status == 'TERMINATED'
+    end
+
+    def running?
+      status == 'RUNNING'
     end
 
     def start!
+      return unless terminated?
+      @cli.gcloud('compute', 'instances', 'start', name)
+    end
+
+    def stop!
+      # work around
+      begin
+        @cli.gcloud_ssh_command(name, 'sudo shutdown -h now')
+      rescue InstanceTerminatedError => e
+        # do nothing
+      end
+    end
+
+    def run_task(task)
+      puts 'running task...'
+      remote_path = '/tmp/gce-task-proxy-task.sh'
+      @cli.gcloud('compute', 'copy-files', task.script_path, name + ':' + remote_path)
+      ret = @cli.gcloud_ssh_command(name, "/bin/bash #{ remote_path }")
+      get_artifacts(task.artifacts)
+      ret
+    end
+
+    def get_artifacts(list)
+      puts 'gathering artifacts...'
+      artifacts_path = '.artifacts'
+      command = "rm -rf #{ artifacts_path } && mkdir -p #{ artifacts_path } && " +
+        list.map { |path| "cp --parents #{ path } #{ artifacts_path }" }.join('; ')
+      @cli.gcloud_ssh_command(name, command)
+      
+      @cli.gcloud('compute', 'copy-files', name + ':' + artifacts_path, 'artifacts')
     end
   end
 
   class InstancePool
-    def find_idle_instances
-      # call gcloud command
+    def initialize(cli: CLI.new)
+      @cli = cli
+    end
+
+    def allocate_instance(instance_index)
+      instances = find_owned_instances
+      instance = instances[instance_index]
       
-      # filter busy instances
-      []
-    end
-
-    def find_stopped_instances
-      [ Instance.new ]
-    end
-
-    def create_instance
-      Instance.new
-    end
-
-    def with_lock(&block)
-      yield
-    end
-
-    def pop(task)
-      with_lock do
-        idle_instances = find_idle_instances
-        unless idle_instances.empty?
-          instance = idle_instances.first
-          instance.mark_busy!
-          return instance
-        end
-      end
-
-      instance = nil
-      with_lock do
-        instance = pick_stopped_instance
-      end
+      raise InstanceAllocationError.new("instance ##{ instance_index } is not found") unless instance
 
       instance.start!
       instance
     end
 
-    def pick_stopped_instance
-      stopped_instances = find_stopped_instances
-      unless stopped_instances.empty?
-        instance = stopped_instances.first
-        instance.mark_busy!
-        return instance
-      end
-
-      raise RetryError.new
+    def free_instance(instance)
+      instance.stop!
     end
 
-    def push(instance)
-      instance.mark_idle!
+    def find_owned_instances
+      Instance.list(@cli).select { |instance| owned_instance?(instance) }
+    end
+
+    def owned_instance?(instance)
+      # TODO: put this condition into config file
+      instance.name =~ /^test-build-/
     end
   end
 
-  class RetryError < StandardError; end
+  class InstanceAllocationError < StandardError; end
+  class InstanceTerminatedError < StandardError; end
+
+  class Task
+    def initialize(script_path, artifacts)
+      @script_path = script_path
+      @artifacts = artifacts
+    end
+
+    attr_reader :script_path, :artifacts
+  end
+
+  class TaskProxy
+    def self.run_task(instance_index, task)
+      pool = InstancePool.new
+
+      retry_count = 0
+
+      begin
+        instance = pool.allocate_instance(instance_index)
+        result = instance.run_task(task)
+      rescue InstanceTerminatedError => e
+        puts "Instance terminated while running task. retrying..."
+        retry_count += 1
+        if retry_count > 5
+          puts "Too many retry. aborting"
+          return 1
+        end
+        retry
+      rescue InstanceAllocationError => e
+        puts "Cannot allocate instance. aborting"
+        return 1
+      end
+
+      pool.free_instance(instance)
+      result
+    end
+  end
 end
 
-GCETaskProxy.new.run_task(GCETaskProxy::Task.new)
+include GoogleComputeEngine
+
+task = Task.new('/tmp/hello_world.sh', [ '**/mapping.txt' ])
+result = TaskProxy.run_task(0, task)
+
+exit(result)
+
