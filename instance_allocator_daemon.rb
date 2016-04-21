@@ -59,6 +59,7 @@ class InstanceAllocatorDaemon
     server = TCPServer.open(@port)
     
     while true
+      puts "wait command"
       Thread.start(server.accept) do |socket|
         exec(socket)
       end
@@ -88,6 +89,7 @@ class InstanceAllocatorDaemon
 
   def free(socket, name)
     instance = Instance.new({ 'name' => name, 'status' => 'TERMINATED' }, @cli)
+    puts "free #{ instance.name }"
     @idle_instances.push(instance)
   end
 
@@ -97,7 +99,7 @@ class InstanceAllocatorDaemon
 
   def owned_instance?(instance)
     # TODO: put this condition into config file
-    instance.name =~ /^test-build-/
+    instance.name =~ /^gce-task-proxy-node/
   end
 end
 

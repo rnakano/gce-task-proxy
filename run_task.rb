@@ -6,7 +6,7 @@ include GoogleComputeEngine
 def allocate_instance
   sock = TCPSocket.open('localhost', 5005)
   sock.puts('allocate')
-  instance_name = sock.gets
+  instance_name = sock.gets.chomp
   sock.close
   cli = CLI.new
   Instance.new({ 'name' => instance_name, 'status' => 'TERMINATED' }, cli)
@@ -23,6 +23,7 @@ def run_task(task)
 
   begin
     instance = allocate_instance
+    puts "Allocate #{ instance.name }"
     result = instance.run_task(task)
   rescue InstanceTerminatedError => e
     puts "Instance terminated while running task. retrying..."
@@ -40,6 +41,6 @@ def run_task(task)
   result
 end
 
-task = Task.new('/tmp/hello_world.sh', [  ] )
+task = Task.new('android-build', './build.sh', [ '**/apk/*.apk' ] )
 result = run_task(task)
 exit(result)

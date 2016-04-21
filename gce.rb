@@ -44,6 +44,8 @@ module GoogleComputeEngine
           print line
           if line.chomp =~ /Broken pipe$/
             pipe_broken = true
+          elsif line.chomp =~ /Timeout.+not responding.$/
+            pipe_broken = true
           end
         end
       end
@@ -101,28 +103,32 @@ module GoogleComputeEngine
       puts 'running task...'
       remote_path = '/tmp/gce-task-proxy-task.sh'
       @cli.gcloud('compute', 'copy-files', task.script_path, name + ':' + remote_path)
-      ret = @cli.gcloud_ssh_command(name, "/bin/bash #{ remote_path }")
-      get_artifacts(task.artifacts)
+      ret = @cli.gcloud_ssh_command(name, "mkdir -p #{ task.workspace } && cd #{ task.workspace } && /bin/bash -xe #{ remote_path }")
+      get_artifacts(task)
       ret
     end
 
-    def get_artifacts(list)
+    def get_artifacts(task)
       puts 'gathering artifacts...'
+      list = task.artifacts
       artifacts_path = '.artifacts'
-      command = "rm -rf #{ artifacts_path } && mkdir -p #{ artifacts_path } && " +
-        list.map { |path| "cp --parents #{ path } #{ artifacts_path }" }.join('; ')
+      command = "cd #{ task.workspace } && rm -rf #{ artifacts_path } && mkdir -p #{ artifacts_path } && " +
+        list.map { |path| "find -wholename '#{ path }' -exec cp --parents {} #{ artifacts_path } \\;" }.join('&&')
       @cli.gcloud_ssh_command(name, command)
       
-      @cli.gcloud('compute', 'copy-files', name + ':' + artifacts_path, 'artifacts')
+      FileUtils.rm_rf('artifacts')
+      FileUtils.mkdir_p('artifacts')
+      @cli.gcloud('compute', 'copy-files', name + ':' + task.workspace + '/' + artifacts_path, 'artifacts')
     end
   end
 
   class Task
-    def initialize(script_path, artifacts)
+    def initialize(workspace, script_path, artifacts)
       @script_path = script_path
       @artifacts = artifacts
+      @workspace = workspace
     end
 
-    attr_reader :script_path, :artifacts
+    attr_reader :script_path, :artifacts, :workspace
   end
 end
