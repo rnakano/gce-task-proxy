@@ -1,6 +1,7 @@
 require 'socket'
 require 'thread'
 require_relative 'gce'
+require_relative 'stack'
 
 include GoogleComputeEngine
 
@@ -11,7 +12,7 @@ class InstanceAllocatorDaemon
   end
 
   def load_initial_queue
-    @idle_instances = Queue.new
+    @idle_instances = Stack.new
 
     instances = Instance.list(@cli).select { |instance| owned_instance?(instance) }
     instances.each do |instance|
@@ -23,12 +24,7 @@ class InstanceAllocatorDaemon
     puts "sweep instances..."
 
     instances = []
-    begin
-      while true
-        instances << @idle_instances.pop(true)
-      end
-    rescue => e
-    end
+    instances = @idle_instances.pop_all
 
     tids = instances.map do |instance|
       Thread.start(instance) do |instance|
