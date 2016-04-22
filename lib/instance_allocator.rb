@@ -5,7 +5,7 @@ require_relative 'stack'
 
 include GoogleComputeEngine
 
-class InstanceAllocatorDaemon
+class InstanceAllocator
   def initialize(port: 5005, cli: CLI.new)
     @port = port
     @cli = cli
@@ -102,5 +102,3 @@ class InstanceAllocatorDaemon
   end
 end
 
-
-InstanceAllocatorDaemon.new.start
