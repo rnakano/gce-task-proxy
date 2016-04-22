@@ -77,7 +77,10 @@ class InstanceAllocatorDaemon
   end
 
   def allocate(socket)
-    instance = @idle_instances.pop
+    until instance = @idle_instances.pop
+      sleep 1
+    end
+
     puts "allocate #{ instance.name }"
     instance.start!
     socket.puts(instance.name)
